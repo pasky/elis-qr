@@ -1,0 +1,296 @@
+<html>
+<head>
+<meta charset="utf-8">
+<title>QR platba pro každou fakturu</title>
+
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/css/bootstrap.min.css">
+<script type="text/javascript" src="jquery-3.3.1.js"></script>
+<script src="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/js/bootstrap.min.js"></script>
+<script type="text/javascript" src="davidshimjs-qrcodejs-04f46c6/qrcode.js"></script>
+
+<style>
+h1 { text-align: center; margin: 2ex 1em; }
+h2, p { margin: 2ex 1em; }
+p { font-size: 12pt; }
+p.warning { text-align: center; color: red; }
+section { margin: 4ex 1em; padding: 2ex 1em; border: 1pt solid black; }
+
+table td { border: 1pt solid black; padding: 1ex 0.5em; }
+</style>
+
+<script type="text/javascript">
+var username = 'qr@elis.rossum.ai';
+var password = 'MArAjeufrp';
+var apiurl = 'https://api.elis.rossum.ai/';
+var workspaceurl = 'https://api.elis.rossum.ai/v1/workspaces/3651';
+var schemaurl = 'https://api.elis.rossum.ai/v1/schemas/4591';
+
+/*** General tools */
+
+function showError(msg) {
+	/* TODO */
+	console.log(msg);
+}
+
+
+/*** Elis methods */
+
+function elis(method, endpoint, params) {
+	var payload = new FormData();
+	Object.entries(params).forEach(e => { payload.append(e[0], e[1]) });
+	console.log(method, endpoint, params, Object.entries(params), payload.entries());
+	return $.ajax({
+		type: method,
+		url: apiurl + 'v1' + endpoint,
+		data: payload,
+		processData: false,
+		xhrFields: {
+			withCredentials: true
+		    },
+		contentType: false,
+		beforeSend: function (xhr) {
+			xhr.setRequestHeader('Authorization', 'Basic ' + btoa(username + ':' + password));
+		    },
+		error: function(res) {
+			showError('error :(' + res);
+		}
+	});
+}
+
+function initQueue() {
+	/* Every browser gets their own queue that they remember persistently. */
+	if (!localStorage.QRElisQueueId) {
+		return new Promise((resolve, reject) => {
+			queue_name = Math.random().toString(36).substr(2, 10);
+			return elis('POST', '/queues', {name: queue_name, workspace: workspaceurl, schema: schemaurl, rir_url: 'https://all.rir.rossum.ai'})
+				.then(res => { localStorage.QRElisQueueId = res.id; });
+		});
+	} else {
+		return Promise.resolve(localStorage.QRElisQueueId);
+	}
+}
+
+function submitFile(queue_id, file) {
+	return elis('POST', '/queues/' + queue_id + '/upload/' + file.name, {content: file});
+}
+
+
+/*** Embedded, QR display methods */
+
+function docToObject(docobj, docres) {
+	console.log('docres', docres);
+	docres.forEach(dp => {
+		if (dp.category == 'datapoint') {
+			docobj[dp.schema_id] = dp.content.value;
+		} else if (dp.category == 'section') {
+			docobj = docToObject(docobj, dp.children);
+		}
+	});
+	return docobj;
+}
+
+function docSPD(docobj) {
+	var spd = 'SPD*1.0';
+	console.log(docobj);
+	if (docobj.iban || (docobj.account_num && docobj.bank_num)) {
+		spd += '*ACC:';
+		if (docobj.iban) {
+			spd += docobj.iban;
+		} else {
+			bank_num = docobj.bank_num;
+			while (bank_num.length < 4) {
+				bank_num = '0' + bank_num;
+			}
+			acct_num = docobj.account_num.replace('-', '');
+			while (acct_num.length < 16) {
+				acct_num = '0' + acct_num;
+			}
+			var iban0 = bank_num + acct_num + '1235';
+			var check = 98 - (iban0 % 97);
+			if (check.length == 1) {
+				check = '0' + check;
+			}
+			spd += 'CZ' + check + bank_num + acct_num;
+		}
+		if (docobj.bic) {
+			spd += '+' + docobj.bic;
+		}
+	}
+	var mapping = {
+		'amount_due': 'AM',
+		'currency': 'CC',
+		'var_sym': 'X-VS',
+		'const_sym': 'X-KS',
+		'spec_sym': 'X-SS'
+	};
+	Object.entries(mapping).forEach(e => {
+		if (docobj[e[0]]) {
+			spd += '*' + e[1] + ':' + docobj[e[0]];
+		}
+	});
+	return spd;
+}
+
+function renderDoc(docobj) {
+	$('#qr_table').empty();
+
+	Object.entries(docobj).forEach(e => {
+		$('#qr_table').append('<tr><td>' + e[0] + '</td><td>' + e[1] + '</td></tr>');
+	});
+
+	new QRCode(document.getElementById("qr_code"), docSPD(docobj));
+}
+
+function showDoc(doc_id) {
+	return elis('GET', '/annotations/' + doc_id + '/content', {}).then(res => renderDoc(docToObject({}, res.content)));
+}
+
+/* Setup QR display */
+$('qr_display').ready(function() {
+	/* TODO check query parameter */
+	var urlParams = new URLSearchParams(window.location.search);
+	if (urlParams.has('doc_id')) {
+		$('#qr_display').show();
+		showDoc(urlParams.get('doc_id'));
+	}
+});
+
+
+/*** Listing methods */
+
+function loadList(queue_id, doc_status) {
+	/* XXX: doc_status max len 2 */
+	return elis('GET', '/annotations?queue=' + queue_id + '&status=' + doc_status[0] + '&sideload=documents', {})
+		.then(res => {
+			var docs = res.results;
+			console.log(doc_status[0], docs);
+			if(doc_status.length > 1) {
+				var p = elis('GET', '/annotations?queue=' + queue_id + '&status=' + doc_status[1] + '&sideload=documents', {})
+				console.log('next', doc_status[1], p);
+				return p
+					.then(res2 => { console.log('join', doc_status, docs, res2.results); docs = docs.concat(res2.results); return docs; });
+			} else {
+				return Promise.resolve(docs);
+			}
+		});
+}
+
+function renderList(list_name, docs) {
+	list_id = '#' + list_name + '_list'
+	console.log('RENDER *** ', list_id, docs);
+	$(list_id).empty();
+	console.log('emp');
+	for (var i = 0; i < docs.length; i++) {
+		var doc = docs[i];
+		console.log('___', doc);
+		var td_button = '';
+		if (list_id == '#verify_list') {
+			td_button = '<td class="tableAnnotate"><button id="link_' + doc.id + '">Anotovat</button></td>';
+		} else if (list_id == '#done_list') {
+			td_button = '<td class="tableAnnotate"><a href="?doc_id=' + doc.id + '">Zobrazit</a></td>';
+		}
+		$(list_id).append('<tr><td class="tableDocId">' + doc.id + '</td>' + td_button + '</tr>');
+		$(document).on('click', '#link_' + doc.id, e => {
+			var qi = window.location.href.indexOf('?');
+			var return_url = qi != -1 ? window.location.href.substring(0, qi) : window.location.href;
+			return_url += '?doc_id=' + doc.id;
+			elis('POST', '/annotations/' + doc.id + '/start_embedded', {'locale': 'cs_CZ', 'return_url': return_url, 'cancel_url': window.location.href})
+				.then(res => { window.location.href = res.url; });
+		});
+	}
+	if (docs.length > 0) {
+		$('#' + list_name + '_box').show();
+	}
+}
+
+function setList(list_id, queue_id, doc_status) {
+	var p = loadList(queue_id, doc_status);
+	console.log(list_id, doc_status, p);
+	p.then(docs => renderList(list_id, docs));
+}
+
+function updateProcessing(queue_id) {
+	return setList('processing', queue_id, ['importing']);
+}
+
+function updateLists(queue_id) {
+	$('#processing_list').ready(function() { updateProcessing(queue_id); });
+	$('#verify_list').ready(function() { setList('verify', queue_id, ['to_review', 'reviewing']); });
+	$('#done_list').ready(function() { setList('done', queue_id, ['exporting', 'exported']); });
+
+	setTimeout(function() { updateLists(queue_id) }, 2000);
+}
+
+
+/*** Initialize app */
+
+initQueue().then(queue_id => {
+	updateLists(queue_id);
+
+	$(document).on('change', '#file_input', e => {
+		for (var i = 0; i < e.target.files.length; i++) {
+			submitFile(queue_id, e.target.files[i]).then(function() { updateProcessing(queue_id) });
+		}
+	});
+});
+
+</script>
+
+</head>
+
+<body>
+
+<h1>QR platba pro každou fakturu</h1>
+
+<p>Vyzkoušejte si, jak vám umělá inteligence <a href="https://rossum.ai/cz/">Elis od Rossumu</a> může ušetřit přepisování. Nahrajte níže několik faktur a nechte si vygenerovat QR kódy pro jejich platbu.</p>
+
+<p><b>Jak to funguje?</b> Nahrajte do systému faktury, hned si je převezme Elis a začne automaticky zpracovávat. Když se ke stránce za pár minut vrátíte, faktury budou připraveny k vaší kontrole.  Po rozkliknutí můžete během pár sekund snadno potvrdit, že jsou všechny údaje v pořádku, a následně už se vám objeví QR kód, který můžete vyfotit třeba ve vašem mobilním bankovnictví.</p>
+
+<p class="warning">POZOR, JEDNÁ SE POUZE O DEMO: Webová stránka pro generování QR kódů není zabezpečená – jiní uživatelé používající toto rozhraní by potenciálně mohli vidět vaše faktury.</p>
+
+<div id="qr_display" style="display: none">
+<section>
+	<h2>Faktura</h2>
+	<div class="container">
+	  <div class="row">
+	    <div class="col-sm-4">
+		<div id="qr_code"></div>
+	    </div>
+	    <div class="col-sm-8">
+		<table id="qr_table" class="table">
+		</table>
+	    </div>
+	  </div>
+	</div>
+</section>
+</div>
+
+<section id="verify_box" style="display: none">
+<h2>Zkontrolujte a zaplaťte</h2>
+<table id="verify_list" class="table">
+</table>
+</section>
+
+<section>
+<h2>Nahrát fakturu</h2>
+<form id="upload_form" enctype="multipart/form-data">
+	<input name="file" type="file" id="file_input" multiple>
+</form>
+</section>
+
+<section id="processing_box" style="display: none">
+<h2>Zpracovávané faktury</h2>
+<p>Prosíme vyčkejte na zpracování faktur, klidně jich nahrajte několik najednou. Nebude to trvat déle než pár minut.</p>
+<table id="processing_list">
+</table>
+</section>
+
+<section id="done_box" style="display: none">
+<h2>Archiv faktur</h2>
+<table id="done_list">
+</table>
+</section>
+
+</body>
+</html>
