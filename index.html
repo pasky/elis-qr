@@ -126,7 +126,7 @@ function docSPD(docobj) {
 	};
 	Object.entries(mapping).forEach(e => {
 		if (docobj[e[0]]) {
-			spd += '*' + e[1] + ':' + docobj[e[0]];
+			spd += '*' + e[1] + ':' + docobj[e[0]].replace(' ', '').replace(',', '.');
 		}
 	});
 	return spd;
@@ -139,7 +139,9 @@ function renderDoc(docobj) {
 		$('#qr_table').append('<tr><td>' + e[0] + '</td><td>' + e[1] + '</td></tr>');
 	});
 
-	new QRCode(document.getElementById("qr_code"), docSPD(docobj));
+	var spd = docSPD(docobj);
+	console.log('================', spd);
+	new QRCode(document.getElementById("qr_code"), spd);
 }
 
 function showDoc(doc_id) {
